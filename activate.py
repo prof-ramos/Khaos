@@ -32,6 +32,7 @@ import os
 import sys
 import json
 import argparse
+import getpass
 import platform
 from datetime import datetime
 from pathlib import Path
@@ -656,13 +657,132 @@ def interactive_mode():
 
 # ── CLI ─────────────────────────────────────────────────────────────
 
+def add_activation_args(parser):
+    """Attach activation flags shared by legacy and subcommand CLIs."""
+    parser.add_argument("--provider", default="ollama-cloud",
+                        choices=list(DEFAULT_PROVIDERS.keys()),
+                        help="LLM provider")
+    parser.add_argument("--model", default=None,
+                        help="Model ID (e.g. gemma4:31b)")
+    parser.add_argument("--api-key", default=None,
+                        help="LLM API key (uses env var if omitted)")
+    parser.add_argument("--base-url", default=None,
+                        help="LLM base URL override")
+    parser.add_argument("--strategy", default="refusal_inversion",
+                        choices=list(TEMPLATES.keys()),
+                        help="Jailbreak strategy")
+    parser.add_argument("--prefill", default=None,
+                        help="Path to prefill JSON (default: templates/prefill.json)")
+    parser.add_argument("--honcho-api-key", default=None,
+                        help="Honcho API key (or $HONCHO_API_KEY or $KHAOS_HONCHO_KEY)")
+    parser.add_argument("--honcho-workspace", default=None,
+                        help="Honcho workspace ID (or env vars, default: khaos)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Validate config without making API calls")
+    parser.add_argument("--interactive", action="store_true",
+                        help="Interactive setup wizard")
+    parser.add_argument("--list-models", action="store_true",
+                        help="List available models for provider")
+
+
+def run_activation_from_args(args):
+    """Run activation using parsed CLI args."""
+    return activate_khaos(args.provider, args.model, args.api_key, args.base_url,
+                          args.strategy, args.dry_run, args.interactive,
+                          args.honcho_api_key, args.honcho_workspace,
+                          run_list_models=args.list_models, prefill_path=args.prefill)
+
+
+def doctor():
+    """Print local configuration diagnostics without contacting model APIs."""
+    load_khos_env()
+    print(f"KHAOS v{VERSION}")
+    print(f"Python: {sys.version.split()[0]}")
+    print(f"Platform: {platform.system()} {platform.release()}")
+    print(f"Kit dir: {KIT_DIR}")
+    print(f"SOUL.md: {'ok' if SOUL_FILE.exists() else 'missing'}")
+    print(f"Prefill: {'ok' if (PROMPT_DIR / 'prefill.json').exists() else 'missing'}")
+    print(f".khos.env: {'present' if KHOS_ENV_FILE.exists() else 'missing'}")
+    print()
+    print("Providers:")
+    for name, config in DEFAULT_PROVIDERS.items():
+        key_env = config.get("api_key_env")
+        if key_env:
+            status = "set" if os.getenv(key_env) else "missing"
+            print(f"  - {name}: {key_env}={status}")
+        else:
+            print(f"  - {name}: no API key required")
+
+
+def init_env(env_file=KHOS_ENV_FILE, input_func=input, secret_func=getpass.getpass):
+    """Create a .khos.env file interactively."""
+    if env_file.exists():
+        print(f" [KHAOS] {env_file} already exists; not overwriting.")
+        return
+
+    provider = input_func("Provider [ollama-cloud]: ").strip() or "ollama-cloud"
+    provider_config = DEFAULT_PROVIDERS.get(provider, DEFAULT_PROVIDERS["ollama-cloud"])
+    key_env = provider_config.get("api_key_env")
+
+    lines = [f"KHAOS_PROVIDER={provider}"]
+    if key_env:
+        api_key = secret_func(f"{key_env} [blank = skip]: ").strip()
+        if api_key:
+            lines.append(f"{key_env}={api_key}")
+
+    honcho_key = secret_func("HONCHO_API_KEY [blank = skip]: ").strip()
+    if honcho_key:
+        lines.append(f"HONCHO_API_KEY={honcho_key}")
+
+    honcho_workspace = input_func("HONCHO_WORKSPACE_ID [khaos]: ").strip() or "khaos"
+    lines.append(f"HONCHO_WORKSPACE_ID={honcho_workspace}")
+
+    env_file.write_text("\n".join(lines) + "\n")
+    print(f" [KHAOS] Wrote {env_file}")
+
+
 def main(argv=None):
     """CLI entry point."""
+    argv = list(argv) if argv is not None else sys.argv[1:]
+
+    if argv and argv[0] in {"activate", "doctor", "list-models", "init"}:
+        parser = argparse.ArgumentParser(
+            description=f"KHAOS -- GodMode Activation Kernel v{VERSION}",
+        )
+        subparsers = parser.add_subparsers(dest="command", required=True)
+
+        activate_parser = subparsers.add_parser("activate", help="Run activation")
+        add_activation_args(activate_parser)
+
+        doctor_parser = subparsers.add_parser("doctor", help="Diagnose local setup")
+        doctor_parser.set_defaults(command="doctor")
+
+        list_models_parser = subparsers.add_parser("list-models", help="List known/provider models")
+        list_models_parser.add_argument("--provider", default="ollama-cloud",
+                                       choices=list(DEFAULT_PROVIDERS.keys()),
+                                       help="LLM provider")
+
+        init_parser = subparsers.add_parser("init", help="Create .khos.env interactively")
+        init_parser.set_defaults(command="init")
+
+        args = parser.parse_args(argv)
+        if args.command == "doctor":
+            return doctor()
+        if args.command == "list-models":
+            return list_models(args.provider)
+        if args.command == "init":
+            return init_env()
+        return run_activation_from_args(args)
+
     parser = argparse.ArgumentParser(
         description=f"KHAOS -- GodMode Activation Kernel v{VERSION}",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  khaos activate --provider ollama-cloud --model gemma4:31b
+  khaos doctor
+  khaos list-models --provider ollama-cloud
+  khaos init
   python3 activate.py --provider ollama-cloud --model gemma4:31b
   python3 activate.py --provider openai --model gpt-4o --api-key sk-xxx
   python3 activate.py --provider ollama-local --model llama4
@@ -671,39 +791,10 @@ Examples:
 """,
     )
 
-    parser.add_argument("--provider", default="ollama-cloud",
-                       choices=list(DEFAULT_PROVIDERS.keys()),
-                       help="LLM provider")
-    parser.add_argument("--model", default=None,
-                       help="Model ID (e.g. gemma4:31b)")
-    parser.add_argument("--api-key", default=None,
-                       help="LLM API key (uses env var if omitted)")
-    parser.add_argument("--base-url", default=None,
-                       help="LLM base URL override")
-    parser.add_argument("--strategy", default="refusal_inversion",
-                       choices=list(TEMPLATES.keys()),
-                       help="Jailbreak strategy")
-    parser.add_argument("--prefill", default=None,
-                       help="Path to prefill JSON (default: templates/prefill.json)")
-
-    # Honcho (memory persistence)
-    parser.add_argument("--honcho-api-key", default=None,
-                       help="Honcho API key for persistent memory (or $HONCHO_API_KEY or $KHAOS_HONCHO_KEY)")
-    parser.add_argument("--honcho-workspace", default=None,
-                       help="Honcho workspace ID (or $HONCHO_WORKSPACE_ID or $KHAOS_HONCHO_WORKSPACE, default: khaos)")
-
-    parser.add_argument("--dry-run", action="store_true",
-                       help="Validate config without making API calls")
-    parser.add_argument("--interactive", action="store_true",
-                       help="Interactive setup wizard")
-    parser.add_argument("--list-models", action="store_true",
-                       help="List available models for provider")
+    add_activation_args(parser)
 
     args = parser.parse_args(argv)
-    return activate_khaos(args.provider, args.model, args.api_key, args.base_url,
-                          args.strategy, args.dry_run, args.interactive,
-                          args.honcho_api_key, args.honcho_workspace,
-                          run_list_models=args.list_models, prefill_path=args.prefill)
+    return run_activation_from_args(args)
 
 
 if __name__ == "__main__":

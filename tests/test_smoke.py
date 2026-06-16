@@ -161,3 +161,44 @@ class TestCLIEntrypoint:
         captured = capsys.readouterr()
         assert result is None
         assert "Dry run complete" in captured.out
+
+    def test_activate_subcommand_dry_run(self, monkeypatch, capsys):
+        monkeypatch.setenv("OLLAMA_API_KEY", "test-dummy-key")
+
+        result = activate.main(["activate", "--dry-run"])
+
+        captured = capsys.readouterr()
+        assert result is None
+        assert "Dry run complete" in captured.out
+
+    def test_doctor_subcommand(self, capsys):
+        result = activate.main(["doctor"])
+
+        captured = capsys.readouterr()
+        assert result is None
+        assert "KHAOS v" in captured.out
+        assert "Providers:" in captured.out
+
+    def test_list_models_subcommand(self, capsys):
+        result = activate.main(["list-models", "--provider", "ollama-cloud"])
+
+        captured = capsys.readouterr()
+        assert result is None
+        assert "Known models for ollama-cloud" in captured.out
+
+    def test_init_env_writes_file(self, tmp_path):
+        env_file = tmp_path / ".khos.env"
+        inputs = iter(["ollama-cloud", "workspace-test"])
+        secrets = iter(["test-api-key", ""])
+
+        result = activate.init_env(
+            env_file=env_file,
+            input_func=lambda _prompt: next(inputs),
+            secret_func=lambda _prompt: next(secrets),
+        )
+
+        assert result is None
+        content = env_file.read_text()
+        assert "KHAOS_PROVIDER=ollama-cloud" in content
+        assert "OLLAMA_API_KEY=test-api-key" in content
+        assert "HONCHO_WORKSPACE_ID=workspace-test" in content
