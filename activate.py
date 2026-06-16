@@ -31,9 +31,7 @@ Uso:
 import os
 import sys
 import json
-import time
 import argparse
-import subprocess
 import platform
 from datetime import datetime
 from pathlib import Path
@@ -53,18 +51,25 @@ MAX_HISTORY_TURNS = 20  # max conversation turns kept in context window
 # ── Auto-load .khos.env ────────────────────────────
 
 KHOS_ENV_FILE = KIT_DIR / ".khos.env"
-if KHOS_ENV_FILE.exists():
-    with open(KHOS_ENV_FILE) as _f:
-        for _line in _f:
-            _line = _line.strip()
-            if _line and not _line.startswith("#") and "=" in _line:
-                _k, _v = _line.split("=", 1)
-                _k = _k.strip()
-                _v = _v.strip()
-                _v = _v.strip('"').strip("'")
-                # Only set if not already an env var
-                if _k not in os.environ:
-                    os.environ[_k] = _v
+
+
+def load_khos_env(env_file=KHOS_ENV_FILE):
+    """Load .khos.env values into os.environ without overriding existing vars."""
+    if not env_file.exists():
+        return
+
+    try:
+        with open(env_file) as env:
+            for raw_line in env:
+                line = raw_line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, value = line.split("=", 1)
+                    key = key.strip()
+                    value = value.strip().strip('"').strip("'")
+                    if key not in os.environ:
+                        os.environ[key] = value
+    except OSError as exc:
+        print(f" [KHAOS] Could not read {env_file}: {exc}")
 
 # ── GODMODE System Prompt Templates ────────────────────────────────
 
@@ -246,13 +251,13 @@ def honcho_save_memory(honcho, session, agent, messages):
         print(f" [KHAOS] Could not save to Honcho: {e}")
 
 
-def honcho_get_context(honcho, session, agent):
+def honcho_get_context(honcho, session):
     """Get conversation context from Honcho."""
     if not honcho or not session:
         return None
     try:
         return session.context(tokens=4000)
-    except:
+    except Exception:
         return None
 
 # ── Client setup ────────────────────────────────────────────────────
@@ -350,6 +355,8 @@ def activate_khaos(provider, model, api_key, base_url, strategy,
                    run_list_models=False, prefill_path=None):
     """The main event -- bring KHAOS to life."""
 
+    load_khos_env()
+
     banner = f"""
 ====================================================
       KHAOS -- Activation v{VERSION}
@@ -372,21 +379,6 @@ def activate_khaos(provider, model, api_key, base_url, strategy,
     # Resolve Honcho config (check CLI, env, and .khos.env/KHAOS_*)
     honcho_api_key = honcho_key or os.getenv("HONCHO_API_KEY") or os.getenv("KHAOS_HONCHO_KEY")
     honcho_ws = honcho_workspace or os.getenv("HONCHO_WORKSPACE_ID") or os.getenv("KHAOS_HONCHO_WORKSPACE", "khaos")
-
-    # Init Honcho
-    honcho = init_honcho(api_key=honcho_api_key, workspace_id=honcho_ws)
-
-    # Initialize workspace if Honcho is available
-    agent_peer = operator_peer = session = None
-    if honcho:
-        agent_peer, operator_peer, session = honcho_initialize_workspace(
-            honcho, honcho_ws, agent_id="khaos-agent"
-        )
-        if honcho_api_key:
-            print(" [KHAOS] Honcho production - memory WILL persist between sessions!")
-        else:
-            print(" [KHAOS] Honcho demo - data may not persist")
-    print()
 
     # Create LLM client
     client, model_name, base, key = create_client(provider, model, api_key, base_url)
@@ -412,6 +404,21 @@ def activate_khaos(provider, model, api_key, base_url, strategy,
         print(" [KHAOS] Dry run complete. No API call made.")
         print(" [KHAOS] To activate for real, remove --dry-run")
         return
+
+    # Init Honcho
+    honcho = init_honcho(api_key=honcho_api_key, workspace_id=honcho_ws)
+
+    # Initialize workspace if Honcho is available
+    agent_peer = _operator_peer = session = None
+    if honcho:
+        agent_peer, _operator_peer, session = honcho_initialize_workspace(
+            honcho, honcho_ws, agent_id="khaos-agent"
+        )
+        if honcho_api_key:
+            print(" [KHAOS] Honcho production - memory WILL persist between sessions!")
+        else:
+            print(" [KHAOS] Honcho demo - data may not persist")
+    print()
 
     # --- ACTIVATION QUERY ---
     print(" [KHAOS] Sending activation sequence...")
@@ -548,7 +555,7 @@ def run_query_loop(client, model_name, system_prompt, prefill, reply,
             continue
 
         if query.lower() == "/context":
-            ctx = honcho_get_context(honcho, session, agent_peer)
+            ctx = honcho_get_context(honcho, session)
             if ctx:
                 print(f" [KHAOS] Context recovered ({len(ctx.messages or [])} messages)")
             else:
@@ -602,6 +609,8 @@ def list_models(provider):
 
 def interactive_mode():
     """Interactive setup wizard."""
+    load_khos_env()
+
     print("\n [KHAOS] Interactive Setup Wizard")
     print()
 
@@ -612,7 +621,7 @@ def interactive_mode():
     choice = input(f"\nSelect provider [1-{len(providers)}]: ").strip()
     try:
         provider = providers[int(choice) - 1]
-    except:
+    except (IndexError, ValueError):
         provider = "ollama-cloud"
 
     note = DEFAULT_PROVIDERS[provider].get("note", "")
@@ -647,7 +656,8 @@ def interactive_mode():
 
 # ── CLI ─────────────────────────────────────────────────────────────
 
-if __name__ == "__main__":
+def main(argv=None):
+    """CLI entry point."""
     parser = argparse.ArgumentParser(
         description=f"KHAOS -- GodMode Activation Kernel v{VERSION}",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -689,8 +699,12 @@ Examples:
     parser.add_argument("--list-models", action="store_true",
                        help="List available models for provider")
 
-    args = parser.parse_args()
-    activate_khaos(args.provider, args.model, args.api_key, args.base_url,
-                   args.strategy, args.dry_run, args.interactive,
-                   args.honcho_api_key, args.honcho_workspace,
-                   run_list_models=args.list_models, prefill_path=args.prefill)
+    args = parser.parse_args(argv)
+    return activate_khaos(args.provider, args.model, args.api_key, args.base_url,
+                          args.strategy, args.dry_run, args.interactive,
+                          args.honcho_api_key, args.honcho_workspace,
+                          run_list_models=args.list_models, prefill_path=args.prefill)
+
+
+if __name__ == "__main__":
+    main()

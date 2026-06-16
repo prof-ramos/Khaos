@@ -1,10 +1,28 @@
 [build-system]
 requires = ["setuptools>=64"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "khaos"
+version = "1.0.0"
+description = "KHAOS activation CLI"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "openai",
+    "honcho-ai",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+]
+
+[project.scripts]
+khaos = "activate:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["activate*"]
+[tool.setuptools]
+py-modules = ["activate"]
